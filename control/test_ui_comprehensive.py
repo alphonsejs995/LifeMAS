@@ -67,12 +67,13 @@ def run_comprehensive_tests():
 
     # Feed point cloud batch
     pts_batch = np.random.uniform(-15, 15, (5088, 3)).astype(np.float32)
-    window.map_window.add_point_cloud(pts_batch, "Lidar1", 5088, 0.0, 0.0, 3.0)
-    window.update_sidebar_map_stats(pts_batch, "Lidar1", 5088, 0.0, 0.0, 3.0)
+    window.map_window.add_lidar_scan(pts_batch, "Lidar1", 5088, 0.0, 0.0, 3.0, 0.0)
+    window.update_sidebar_map_stats(pts_batch, "Lidar1", 5088, 0.0, 0.0, 3.0, 0.0)
     app.processEvents()
 
-    assert len(window.map_window.accumulated_points) == 5088
-    print(f"[PASS] Map point cloud batch updated: {len(window.map_window.accumulated_points):,} points")
+    pts_3d_count = len(window.map_window.map_manager.get_3d_points())
+    assert pts_3d_count > 0
+    print(f"[PASS] Map point cloud batch updated: {pts_3d_count:,} points")
 
     # Update Telemetry UI with single drone
     mock_telemetry = {
@@ -101,8 +102,8 @@ def run_comprehensive_tests():
     print("[PASS] Autonomous mission status handling verified.")
 
     # Test Map Reset & Close
-    window.map_window.reset_map()
-    assert len(window.map_window.accumulated_points) == 0
+    window.map_window.map_manager.clear()
+    assert len(window.map_window.map_manager.grid_cells) == 0
     window.map_window.hide()
     app.processEvents()
     print("[PASS] Map reset & hide verified.")

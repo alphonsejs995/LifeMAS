@@ -38,7 +38,7 @@ In GPS-denied or degraded disaster zones, single-agent platforms face payload, b
 
 1. **Autonomous Flight Control**: Provide robust Python-driven API control over UAV kinematics, takeoff/landing sequences, and multi-axis velocity vectors.
 2. **Integrated Control Dashboard**: Offer a modern operator dashboard built with PySide6 that embeds live Unreal Engine simulator viewports, displays real-time telemetry, and exposes manual override tools.
-3. **Disaster Environment Mapping**: Reconstruct 3D spatial environments and point clouds in real time using 3D LiDAR sensors and PyOpenGL rendering.
+3. **Disaster Environment Mapping**: Reconstruct persistent 2D occupancy grids and 3D voxel point clouds in real time using 3D LiDAR sensors and PyOpenGL rendering.
 4. **Cooperative Multi-Agent Coordination**: Enable swarms of autonomous drones to execute distributed search missions without central bottlenecks. *(Planned)*
 5. **Multi-Agent Reinforcement Learning (MARL)**: Implement algorithms such as **MAPPO** (Multi-Agent Proximal Policy Optimization) for dynamic obstacle avoidance and cooperative task allocation. *(Planned)*
 
@@ -46,15 +46,19 @@ In GPS-denied or degraded disaster zones, single-agent platforms face payload, b
 
 ## ✅ Current Implementation Status
 
-The project features a **multi-threaded drone simulation dashboard, 3D LiDAR mapper, and autonomous flight engine**:
+The project features a **multi-threaded drone simulation dashboard, persistent spatial mapping engine, and autonomous flight controller**:
 
 - **AirSimNH Simulator Integration**: Automated launching and Win32 window embedding of the packaged `AirSimNH` Unreal Engine environment directly into a PySide6 GUI container.
-- **Real-Time 3D LiDAR Point Cloud Mapper**: Integrated 3D spatial visualization viewport using `pyqtgraph.opengl` and PyOpenGL, rendering live LiDAR point clouds collected during flight.
+- **Persistent World-Frame Mapping Engine (`mapping/persistent_map.py`)**:
+  - **2D Occupancy Grid**: Robot-vacuum style occupancy grid using 2D Bresenham ray-tracing for free-space and obstacle demarcation.
+  - **3D Voxel Point Cloud**: World-coordinate voxel grid with spatial deduplication to prevent point accumulation.
+  - **Disk Persistence**: Save and load compressed maps (`.npz`) with metadata, cell values, and world bounds preserved.
+- **Dual Visualizer Window**: Dedicated UI for real-time 2D occupancy grid plotting and OpenGL 3D spatial point cloud exploration.
 - **Asynchronous Worker Architecture**: Non-blocking `QThread` pipeline (`AirSimWorker`, `AutonomousMappingWorker`, `LandingWorker`) ensuring smooth GUI responsiveness during heavy telemetry polling and flight maneuvers.
-- **Autonomous Mapping Mission Control**: Pre-program flight patterns (takeoff, lawnmower/perimeter search grid, 3D LiDAR scanning, automated landing & disarm).
+- **Autonomous Mapping Mission Control**: Pre-programmed flight patterns (takeoff, lawnmower/perimeter search grid, 3D LiDAR scanning, automated landing & disarm).
 - **Live Telemetry & Diagnostics**: Real-time rendering of UAV position coordinates $(x, y, z)$, linear velocities $(v_x, v_y, v_z)$, pitch/roll/yaw orientation, battery/connection status, and mission logs.
 - **Manual WASD Control UI**: Dedicated interactive GUI window enabling smooth 6-DOF manual keyboard flight testing ($W/S$ forward/backward, $A/D$ left/right, $R/F$ ascend/descend, $Q/E$ yaw turn, `Space` emergency hover).
-- **Comprehensive Testing Suite**: Diagnostic scripts in `control/` for LiDAR point cloud verification, autonomous mapping simulation, UI component testing, and flight readiness.
+- **Comprehensive Testing Suite**: Diagnostic scripts in `control/` for LiDAR point cloud verification, persistent map stability, autonomous mapping simulation, UI component testing, and flight readiness.
 
 > [!NOTE]
 > *Multi-agent swarm coordination and MARL policy training (MAPPO) are active roadmap goals under ongoing development.*
@@ -67,19 +71,25 @@ The project features a **multi-threaded drone simulation dashboard, 3D LiDAR map
                                 +-----------------------------------+
                                 |     LifeMAS PySide6 Dashboard     |
                                 |  (Main UI, Telemetry & Controls)  |
-                                +-----+-----------------------+-----+
-                                      |                       |
-                 +--------------------+                       +--------------------+
-                 |                                                                 |
-                 v                                                                 v
-+---------------------------------+                               +---------------------------------+
-|   Embedded AirSimNH Viewport    |                               |  3D LiDAR Point Cloud Viewport  |
-| (Win32 HWND Host Workspace)     |                               |   (PyQtGraph + PyOpenGL 3D)     |
-+---------------------------------+                               +---------------------------------+
-                 |                                                                 |
-                 +--------------------+                       +--------------------+
-                                      |                       |
-                                      v                       v
+                                +-----+---------------+-------+-----+
+                                      |               |       |
+                 +--------------------+               |       +--------------------+
+                 |                                    |                            |
+                 v                                    v                            v
++---------------------------------+  +---------------------------------+  +---------------------------------+
+|   Embedded AirSimNH Viewport    |  |     2D Occupancy Grid Map       |  |  3D LiDAR Point Cloud Viewport  |
+| (Win32 HWND Host Workspace)     |  |   (Bresenham Ray-Tracing)       |  |   (PyQtGraph + PyOpenGL 3D)     |
++---------------------------------+  +----------------+----------------+  +---------------------------------+
+                 |                                    |                            |
+                 +--------------------+               |       +--------------------+
+                                      |               |       |
+                                      v               v       v
+                                +-----------------------------------+
+                                |     PersistentMapManager Engine   |
+                                |  (World-Frame Grid + 3D Voxels)   |
+                                +-----------------+-----------------+
+                                                  |
+                                                  v
                                 +-----------------------------------+
                                 |  QThread Asynchronous Worker Pool |
                                 |  (AirSimWorker, Mapping, Landing) |
@@ -187,8 +197,9 @@ python ui/main.py
 ```
 1. Click **1 Launch Simulator** to launch the `AirSimNH` process.
 2. Click **2 Embed Viewport** to dock the simulator window directly into the primary dashboard workspace.
-3. Click **3 Connect API** to initiate asynchronous telemetry and 3D LiDAR streaming.
+3. Click **3 Connect API** to initiate asynchronous telemetry, mapping, and 3D LiDAR streaming.
 4. Click **▶ Start Mapping Mission** to execute automated spatial scanning.
+5. Use **Open Map Window** to inspect the 2D occupancy grid and 3D point cloud, and use **Save Map** / **Load Map** to persist maps across sessions.
 
 ### Option B: WASD Flight Controller
 ```bash
@@ -203,6 +214,12 @@ python wasd_control.py
 
 ### Option C: Running the Diagnostic Test Suite
 ```bash
+# Verify persistent mapping engine requirements
+python control/test_persistent_mapping.py
+
+# Test persistent map manager unit functionality
+python control/test_map_manager.py
+
 # Run comprehensive diagnostic test suite
 python control/run_diagnostic.py
 
@@ -222,7 +239,7 @@ python control/test_ui_comprehensive.py
 
 ```
 LifeMAS/
-├── .gitignore                    # Git ignore rules for binaries, venv, and pycache
+├── .gitignore                    # Git ignore rules for binaries, venv, pycache, and datasets
 ├── LICENSE                       # MIT License
 ├── README.md                     # Comprehensive project documentation
 ├── requirements.txt              # Python dependency manifest (PySide6, pyqtgraph, PyOpenGL, airsim)
@@ -237,11 +254,17 @@ LifeMAS/
 │   ├── run_diagnostic.py         # Test suite runner
 │   ├── test_autonomous_mapping.py# Mapping flight mission verification
 │   ├── test_lidar.py             # 3D LiDAR sensor streaming test
+│   ├── test_map_manager.py       # PersistentMapManager unit tests
+│   ├── test_persistent_mapping.py# Multi-scan coordinate stability & persistence tests
 │   ├── test_ui_comprehensive.py  # UI component integration test
 │   └── test_ui_launch.py         # Headless UI launch test
+├── data/
+│   └── maps/                     # Directory for persistent map storage (.npz)
+│       └── .gitkeep
+├── mapping/                      # Spatial mapping engine
+│   └── persistent_map.py         # PersistentMapManager (2D Occupancy Grid + 3D Voxels)
 ├── ui/                           # PySide6 graphical user interface
-│   └── main.py                   # Main dashboard, QThread worker pool & 3D LiDAR viewport
-├── mapping/                      # [In Progress] Spatial mapping & occupancy grid module
+│   └── main.py                   # Main dashboard, QThread worker pool, 2D Grid & 3D LiDAR window
 └── simulator/                    # [Planned] Multi-drone spawning & environment management
 ```
 
@@ -257,9 +280,10 @@ LifeMAS/
   - [x] Real-time 3D LiDAR point cloud rendering (`pyqtgraph.opengl`).
   - [x] Asynchronous `QThread` worker architecture (`AirSimWorker`, `AutonomousMappingWorker`, `LandingWorker`).
   - [x] Automated mapping mission flight routines.
-- [ ] **Phase 3: Spatial Occupancy Grid & Obstacle Mapping**
-  - [ ] 2D/3D OctoMap/Occupancy Grid generation from point cloud streams.
-  - [ ] Dynamic obstacle boundary detection for disaster terrain.
+- [x] **Phase 3: Spatial Occupancy Grid & Persistent Mapping**
+  - [x] Persistent world-frame 2D occupancy grid with Bresenham ray-tracing.
+  - [x] 3D voxel grid point deduplication.
+  - [x] Map file persistence (compressed `.npz` save/load).
 - [ ] **Phase 4: Multi-Agent Swarm Integration**
   - [ ] Multi-vehicle configuration in AirSim (`Drone1`, `Drone2`, `Drone3`).
   - [ ] Distributed swarm communication protocol.

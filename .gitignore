@@ -26,6 +26,13 @@ Saved/
 *.tmp
 *.log
 
+# Generated datasets and mapping cache
+*.npz
+*.npy
+*.tmp.npz
+data/maps/*.npz
+!data/maps/.gitkeep
+
 # Editor & OS files
 .vscode/
 .idea/

@@ -3,16 +3,17 @@ import os
 import subprocess
 import sys
 import time
+import math
 import numpy as np
 import airsim
 from ctypes import wintypes
 
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, Slot
-from PySide6.QtGui import QVector3D
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, Slot, QPointF, QRectF
+from PySide6.QtGui import QVector3D, QPainter, QColor, QPen, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout, QStatusBar, QMessageBox,
-    QSplitter
+    QSplitter, QStackedWidget
 )
 import pyqtgraph.opengl as gl
 
@@ -21,6 +22,12 @@ SIMULATOR = os.path.join(
     PROJECT, "AirSimNH", "AirSimNH",
     "WindowsNoEditor", "AirSimNH.exe"
 )
+
+# Import Persistent Map Manager
+sys.path.insert(0, PROJECT)
+from mapping.persistent_map import PersistentMapManager
+
+MAP_SAVE_FILE = os.path.join(PROJECT, "data", "maps", "airsim_map.npz")
 
 # --- Win32 Window Embedding APIs ---
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -127,7 +134,7 @@ class Viewport(QFrame):
             self.on_resize()
 
 
-# --- Spatial Transformations ---
+# --- Spatial Math Transformations ---
 
 def quaternion_to_rotation_matrix(q):
     w, x, y, z = q.w_val, q.x_val, q.y_val, q.z_val
@@ -141,6 +148,13 @@ def quaternion_to_rotation_matrix(q):
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]
     ], dtype=np.float32)
+
+
+def quaternion_to_yaw(q):
+    w, x, y, z = q.w_val, q.x_val, q.y_val, q.z_val
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 
 def transform_sensor_to_world_vis(pts_sensor, sensor_pose, vehicle_pose):
@@ -190,10 +204,164 @@ def compute_point_colors(pts_vis):
     return colors
 
 
+# --- Robot-Vacuum Style 2D Occupancy Grid Viewport Widget ---
+
+class OccupancyGridWidget(QWidget):
+    def __init__(self, map_manager, parent=None):
+        super().__init__(parent)
+        self.map_manager = map_manager
+        self.scale = 22.0  # Pixels per meter
+        self.offset_x = 0.0  # World X center offset
+        self.offset_y = 0.0  # World Y center offset
+        
+        self.drone_x = 0.0
+        self.drone_y = 0.0
+        self.drone_yaw = 0.0  # Radians
+        
+        self.dragging = False
+        self.last_mouse_pos = None
+
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_drone_pose(self, x, y, yaw_rad):
+        self.drone_x = float(x)
+        self.drone_y = float(y)
+        self.drone_yaw = float(yaw_rad)
+        self.update()
+
+    def fit_to_map(self):
+        if self.map_manager.has_bounds:
+            min_x, max_x = self.map_manager.min_x, self.map_manager.max_x
+            min_y, max_y = self.map_manager.min_y, self.map_manager.max_y
+            
+            span_x = max(max_x - min_x, 6.0)
+            span_y = max(max_y - min_y, 6.0)
+            
+            self.offset_x = (min_x + max_x) / 2.0
+            self.offset_y = (min_y + max_y) / 2.0
+            
+            w_pixels = max(self.width(), 100)
+            h_pixels = max(self.height(), 100)
+            
+            scale_x = (w_pixels * 0.75) / span_x
+            scale_y = (h_pixels * 0.75) / span_y
+            self.scale = max(4.0, min(scale_x, scale_y, 120.0))
+        else:
+            self.offset_x = self.drone_x
+            self.offset_y = self.drone_y
+            self.scale = 22.0
+        self.update()
+
+    def reset_view(self):
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self.scale = 22.0
+        self.update()
+
+    def world_to_screen(self, wx, wy):
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+        sx = cx + (wx - self.offset_x) * self.scale
+        sy = cy - (wy - self.offset_y) * self.scale
+        return sx, sy
+
+    def mousePressEvent(self, event):
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+            self.dragging = True
+            self.last_mouse_pos = event.position()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging and self.last_mouse_pos is not None:
+            delta = event.position() - self.last_mouse_pos
+            self.last_mouse_pos = event.position()
+            self.offset_x -= delta.x() / self.scale
+            self.offset_y += delta.y() / self.scale
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+            self.dragging = False
+            self.last_mouse_pos = None
+
+    def wheelEvent(self, event):
+        angle = event.angleDelta().y()
+        factor = 1.15 if angle > 0 else 0.85
+        self.scale = max(2.0, min(self.scale * factor, 300.0))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 1. Neutral Unknown Dark Background (#080a0e)
+        painter.fillRect(self.rect(), QColor("#080a0e"))
+
+        grid, min_gx, max_gx, min_gy, max_gy, cell_size = self.map_manager.get_2d_occupancy_grid()
+
+        # 2. Render Grid Cells
+        if grid.size > 1 and (min_gx != max_gx or min_gy != max_gy):
+            free_color = QColor(30, 41, 59, 210)       # Explored subtle slate (#1e293b)
+            occupied_color = QColor(56, 189, 248, 255) # High-contrast bright cyan (#38bdf8)
+
+            height_rows, width_cols = grid.shape
+            cell_pixel_sz = max(1.0, cell_size * self.scale)
+
+            for r in range(height_rows):
+                gy = min_gy + r
+                for c in range(width_cols):
+                    state = grid[r, c]
+                    if state == 0:
+                        continue
+                    
+                    gx = min_gx + c
+                    wx = gx * cell_size
+                    wy = gy * cell_size
+                    
+                    sx, sy = self.world_to_screen(wx, wy)
+                    rect = QRectF(sx, sy - cell_pixel_sz, cell_pixel_sz, cell_pixel_sz)
+                    
+                    if state == 1:
+                        painter.fillRect(rect, free_color)
+                    elif state == 2:
+                        painter.fillRect(rect, occupied_color)
+
+        # 3. Draw World Axes & Faint Grid Lines
+        ox, oy = self.world_to_screen(0, 0)
+        
+        pen_axis_x = QPen(QColor(239, 68, 68, 160), 1.5) # +X Red (North)
+        pen_axis_y = QPen(QColor(34, 197, 94, 160), 1.5) # +Y Green (East)
+        
+        painter.setPen(pen_axis_x)
+        x_end_x, x_end_y = self.world_to_screen(3.0, 0)
+        painter.drawLine(QPointF(ox, oy), QPointF(x_end_x, x_end_y))
+        
+        painter.setPen(pen_axis_y)
+        y_end_x, y_end_y = self.world_to_screen(0, 3.0)
+        painter.drawLine(QPointF(ox, oy), QPointF(y_end_x, y_end_y))
+
+        # 4. Render Drone Position Marker & Heading Direction Vector
+        dx_screen, dy_screen = self.world_to_screen(self.drone_x, self.drone_y)
+        
+        # Drone Red Dot
+        painter.setPen(QPen(QColor("#f8fafc"), 1.5))
+        painter.setBrush(QBrush(QColor("#ef4444")))
+        painter.drawEllipse(QPointF(dx_screen, dy_screen), 6.5, 6.5)
+
+        # Drone Heading Vector Line (Yaw angle)
+        head_len = 18.0
+        hx = dx_screen + head_len * math.cos(self.drone_yaw)
+        hy = dy_screen - head_len * math.sin(self.drone_yaw)
+        
+        painter.setPen(QPen(QColor("#facc15"), 2.2))
+        painter.drawLine(QPointF(dx_screen, dy_screen), QPointF(hx, hy))
+        painter.end()
+
+
 # --- Workers ---
 
 class LidarTelemetryWorker(QThread):
-    lidar_data_signal = Signal(object, str, int, float, float, float)
+    lidar_data_signal = Signal(object, str, int, float, float, float, float) # (pts_vis, sensor, count, dx, dy, dz, yaw)
     telemetry_signal = Signal(dict)
     sensor_status_signal = Signal(str, str, int)
     connection_status_signal = Signal(bool, str)
@@ -240,7 +408,10 @@ class LidarTelemetryWorker(QThread):
                 )
                 pos = state.kinematics_estimated.position
                 vel = state.kinematics_estimated.linear_velocity
+                ori = state.kinematics_estimated.orientation
+                
                 dx_vis, dy_vis, dz_vis = pos.x_val, pos.y_val, -pos.z_val
+                yaw_rad = quaternion_to_yaw(ori)
 
                 vehicles_list = self.client.listVehicles()
                 telemetry = {
@@ -278,7 +449,7 @@ class LidarTelemetryWorker(QThread):
                         )
                         self.lidar_data_signal.emit(
                             pts_vis, "Lidar1", len(pts_vis),
-                            dx_vis, dy_vis, dz_vis
+                            dx_vis, dy_vis, dz_vis, yaw_rad
                         )
                         self.sensor_status_signal.emit(
                             "ACTIVE", "Lidar1", len(pts_vis)
@@ -331,7 +502,7 @@ class LidarTelemetryWorker(QThread):
                                 )
                                 self.lidar_data_signal.emit(
                                     pts_vis, "DepthCamera", len(pts_vis),
-                                    dx_vis, dy_vis, dz_vis
+                                    dx_vis, dy_vis, dz_vis, yaw_rad
                                 )
                                 self.sensor_status_signal.emit(
                                     "ACTIVE", "Depth Camera", len(pts_vis)
@@ -382,10 +553,25 @@ class AutonomousMissionWorker(QThread):
 
     def run(self):
         try:
-            self.client = airsim.MultirotorClient(
-                ip=self.ip, port=self.port, timeout_value=5
-            )
-            self.client.confirmConnection()
+            connected = False
+            for attempt in range(8):
+                try:
+                    self.client = airsim.MultirotorClient(
+                        ip=self.ip, port=self.port, timeout_value=3
+                    )
+                    self.client.confirmConnection()
+                    connected = True
+                    break
+                except Exception:
+                    self.status_signal.emit(
+                        "CONNECTING", f"Waiting for AirSim API connection (attempt {attempt+1}/8)..."
+                    )
+                    time.sleep(1.0)
+
+            if not connected:
+                raise RuntimeError(
+                    "Could not connect to AirSim API (127.0.0.1:41451). Make sure AirSimNH is running."
+                )
 
             # Step 1: Enable API Control & Arm
             self.status_signal.emit(
@@ -490,15 +676,14 @@ class LandingWorker(QThread):
             self.completed_signal.emit(False, f"Landing failed: {exc}")
 
 
-# --- Maximized 3D Spatial Map Window ---
+# --- Maximized Persistent Spatial Map Window ---
 
 class SpatialMapWindow(QMainWindow):
-    def __init__(self, parent=None):
+    def __init__(self, map_manager, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("LifeMAS | 3D Spatial LiDAR Mapping Workspace")
+        self.map_manager = map_manager
+        self.setWindowTitle("LifeMAS | Persistent World-Frame Mapping Workspace")
         self.resize(1280, 800)
-        self.max_points = 300000
-        self.accumulated_points = np.empty((0, 3), dtype=np.float32)
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -510,43 +695,67 @@ class SpatialMapWindow(QMainWindow):
         header = QFrame()
         header.setObjectName("map_header")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(16, 10, 16, 10)
+        header_layout.setContentsMargins(14, 8, 14, 8)
 
-        title = QLabel("3D REAL-TIME SPATIAL LIDAR MAP")
+        title = QLabel("PERSISTENT SPATIAL MAP")
         title.setObjectName("map_title")
+
+        # View Mode Toggle Buttons
+        self.btn_2d_mode = QPushButton("2D Vacuum Grid Mode")
+        self.btn_2d_mode.setObjectName("btn_mode_active")
+        self.btn_2d_mode.clicked.connect(self.show_2d_mode)
+
+        self.btn_3d_mode = QPushButton("3D Point Cloud View")
+        self.btn_3d_mode.setObjectName("btn_mode_inactive")
+        self.btn_3d_mode.clicked.connect(self.show_3d_mode)
 
         self.sensor_badge = QLabel("SENSOR: AWAITING DATA")
         self.sensor_badge.setObjectName("badge_neutral")
 
-        self.pts_badge = QLabel("POINTS: 0")
-        self.pts_badge.setObjectName("badge_neutral")
+        self.stats_badge = QLabel("EXPLORED: 0.0 m² | 3D PTS: 0")
+        self.stats_badge.setObjectName("badge_neutral")
 
-        self.mission_badge = QLabel("MISSION: IDLE")
-        self.mission_badge.setObjectName("badge_neutral")
+        self.save_map_btn = QPushButton("Save Map")
+        self.save_map_btn.setObjectName("btn_small")
+        self.save_map_btn.clicked.connect(self.save_map_action)
+
+        self.load_map_btn = QPushButton("Load Map")
+        self.load_map_btn.setObjectName("btn_small")
+        self.load_map_btn.clicked.connect(self.load_map_action)
+
+        self.fit_map_btn = QPushButton("Fit to Map")
+        self.fit_map_btn.setObjectName("btn_small")
+        self.fit_map_btn.clicked.connect(self.fit_to_map)
 
         self.reset_map_btn = QPushButton("Reset Map")
         self.reset_map_btn.setObjectName("btn_small")
-        self.reset_map_btn.clicked.connect(self.reset_map)
-
-        self.reset_view_btn = QPushButton("Reset View")
-        self.reset_view_btn.setObjectName("btn_small")
-        self.reset_view_btn.clicked.connect(self.reset_view)
+        self.reset_map_btn.clicked.connect(self.reset_map_action)
 
         self.back_btn = QPushButton("◀ Return to Simulator View")
         self.back_btn.setObjectName("btn_primary_small")
         self.back_btn.clicked.connect(self.hide)
 
         header_layout.addWidget(title)
+        header_layout.addWidget(self.btn_2d_mode)
+        header_layout.addWidget(self.btn_3d_mode)
         header_layout.addStretch()
         header_layout.addWidget(self.sensor_badge)
-        header_layout.addWidget(self.pts_badge)
-        header_layout.addWidget(self.mission_badge)
+        header_layout.addWidget(self.stats_badge)
+        header_layout.addWidget(self.save_map_btn)
+        header_layout.addWidget(self.load_map_btn)
+        header_layout.addWidget(self.fit_map_btn)
         header_layout.addWidget(self.reset_map_btn)
-        header_layout.addWidget(self.reset_view_btn)
         header_layout.addWidget(self.back_btn)
         layout.addWidget(header)
 
-        # OpenGL 3D Viewport
+        # Stacked Widget (Index 0: 2D Occupancy Grid, Index 1: 3D Point Cloud)
+        self.stack = QStackedWidget()
+        
+        # 1. 2D Occupancy Grid Widget
+        self.occupancy_widget = OccupancyGridWidget(self.map_manager)
+        self.stack.addWidget(self.occupancy_widget)
+
+        # 2. 3D OpenGL Viewport Widget
         self.gl_widget = gl.GLViewWidget()
         self.gl_widget.setBackgroundColor('#080a0e')
         self.gl_widget.setCameraPosition(distance=35, elevation=25, azimuth=45)
@@ -568,37 +777,71 @@ class SpatialMapWindow(QMainWindow):
         )
         self.gl_widget.addItem(self.scatter_item)
 
-        self.drone_marker = gl.GLScatterPlotItem(
+        self.drone_marker_3d = gl.GLScatterPlotItem(
             pos=np.empty((0, 3), dtype=np.float32),
             color=(0.95, 0.25, 0.25, 1.0),
             size=10.0,
             pxMode=True
         )
-        self.gl_widget.addItem(self.drone_marker)
+        self.gl_widget.addItem(self.drone_marker_3d)
 
-        layout.addWidget(self.gl_widget, 1)
+        self.stack.addWidget(self.gl_widget)
+        layout.addWidget(self.stack, 1)
 
-    @Slot(object, str, int, float, float, float)
-    def add_point_cloud(self, pts_new, sensor_name, scan_pts, dx, dy, dz):
-        if len(pts_new) > 0:
-            if len(self.accumulated_points) == 0:
-                self.accumulated_points = pts_new
-            else:
-                self.accumulated_points = np.vstack(
-                    (self.accumulated_points, pts_new)
-                )
+    def show_2d_mode(self):
+        self.stack.setCurrentIndex(0)
+        self.btn_2d_mode.setObjectName("btn_mode_active")
+        self.btn_3d_mode.setObjectName("btn_mode_inactive")
+        self.btn_2d_mode.style().unpolish(self.btn_2d_mode)
+        self.btn_2d_mode.style().polish(self.btn_2d_mode)
+        self.btn_3d_mode.style().unpolish(self.btn_3d_mode)
+        self.btn_3d_mode.style().polish(self.btn_3d_mode)
+        self.occupancy_widget.update()
 
-            if len(self.accumulated_points) > self.max_points:
-                self.accumulated_points = self.accumulated_points[-self.max_points:]
+    def show_3d_mode(self):
+        self.stack.setCurrentIndex(1)
+        self.btn_3d_mode.setObjectName("btn_mode_active")
+        self.btn_2d_mode.setObjectName("btn_mode_inactive")
+        self.btn_2d_mode.style().unpolish(self.btn_2d_mode)
+        self.btn_2d_mode.style().polish(self.btn_2d_mode)
+        self.btn_3d_mode.style().unpolish(self.btn_3d_mode)
+        self.btn_3d_mode.style().polish(self.btn_3d_mode)
+        self.update_3d_render()
 
-            colors = compute_point_colors(self.accumulated_points)
-            self.scatter_item.setData(
-                pos=self.accumulated_points, color=colors
-            )
+    @Slot(object, str, int, float, float, float, float)
+    def add_lidar_scan(self, pts_new, sensor_name, scan_pts, dx, dy, dz, yaw_rad=0.0):
+        # 1. Integrate scan into persistent map manager
+        self.map_manager.add_lidar_scan(pts_new, dx, dy, dz)
 
-        drone_pos = np.array([[dx, dy, dz]], dtype=np.float32)
-        self.drone_marker.setData(pos=drone_pos)
-        self.pts_badge.setText(f"POINTS: {len(self.accumulated_points):,}")
+        # 2. Update 2D Occupancy Grid View
+        self.occupancy_widget.set_drone_pose(dx, dy, yaw_rad)
+
+        # 3. Update 3D View if visible
+        if self.stack.currentIndex() == 1:
+            self.update_3d_render()
+            drone_pos = np.array([[dx, dy, dz]], dtype=np.float32)
+            self.drone_marker_3d.setData(pos=drone_pos)
+
+        # 4. Update Stats
+        explored_cells = len(self.map_manager.grid_cells)
+        area_m2 = explored_cells * (self.map_manager.cell_size ** 2)
+        pts_3d_count = len(self.map_manager.voxel_points)
+        self.stats_badge.setText(f"EXPLORED: {area_m2:.1f} m² | 3D PTS: {pts_3d_count:,}")
+
+    def add_point_cloud(self, pts_new, sensor_name, scan_pts, dx, dy, dz, yaw_rad=0.0):
+        self.add_lidar_scan(pts_new, sensor_name, scan_pts, dx, dy, dz, yaw_rad)
+
+    def update_3d_render(self):
+        pts_3d = self.map_manager.get_3d_points()
+        if len(pts_3d) > 0:
+            colors = compute_point_colors(pts_3d)
+            self.scatter_item.setData(pos=pts_3d, color=colors)
+
+    @Slot(str, str)
+    def update_mission_status(self, phase, msg):
+        if hasattr(self, "mission_badge"):
+            self.mission_badge.setText(f"MISSION: {phase}")
+        self.statusBar().showMessage(f"[{phase}] {msg}") if self.statusBar() else None
 
     @Slot(str, str, int)
     def update_sensor_status(self, status, sensor_name, scan_pts):
@@ -614,26 +857,48 @@ class SpatialMapWindow(QMainWindow):
         self.sensor_badge.style().unpolish(self.sensor_badge)
         self.sensor_badge.style().polish(self.sensor_badge)
 
-    @Slot(str, str)
-    def update_mission_status(self, phase, msg):
-        self.mission_badge.setText(f"MISSION: {phase}")
-        if phase in ("ARMING", "TAKEOFF", "NAVIGATING", "SCANNING"):
-            self.mission_badge.setObjectName("badge_active")
-        elif phase in ("HOVERING", "COMPLETE"):
-            self.mission_badge.setObjectName("badge_info")
-        else:
-            self.mission_badge.setObjectName("badge_neutral")
-        self.mission_badge.style().unpolish(self.mission_badge)
-        self.mission_badge.style().polish(self.mission_badge)
-
-    def reset_map(self):
-        self.accumulated_points = np.empty((0, 3), dtype=np.float32)
-        self.scatter_item.setData(pos=self.accumulated_points)
-        self.pts_badge.setText("POINTS: 0")
+    def fit_to_map(self):
+        self.occupancy_widget.fit_to_map()
 
     def reset_view(self):
+        self.occupancy_widget.reset_view()
         self.gl_widget.setCameraPosition(distance=35, elevation=25, azimuth=45)
-        self.gl_widget.opts['center'] = QVector3D(0, 0, 0)
+
+    def save_map_action(self):
+        try:
+            self.map_manager.save_map(MAP_SAVE_FILE)
+            QMessageBox.information(
+                self, "Map Saved", f"Persistent map saved to:\n{MAP_SAVE_FILE}"
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", str(exc))
+
+    def load_map_action(self):
+        try:
+            if self.map_manager.load_map(MAP_SAVE_FILE):
+                self.occupancy_widget.fit_to_map()
+                self.update_3d_render()
+                QMessageBox.information(
+                    self, "Map Loaded", f"Map loaded from:\n{MAP_SAVE_FILE}"
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Map Not Found", f"No saved map file found at:\n{MAP_SAVE_FILE}"
+                )
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", str(exc))
+
+    def reset_map_action(self):
+        reply = QMessageBox.question(
+            self, "Reset Map",
+            "Are you sure you want to clear the persistent map?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.map_manager.clear()
+            self.scatter_item.setData(pos=np.empty((0, 3), dtype=np.float32))
+            self.occupancy_widget.update()
+            self.stats_badge.setText("EXPLORED: 0.0 m² | 3D PTS: 0")
 
 
 # --- Main LifeMAS Application Window ---
@@ -656,8 +921,15 @@ class LifeMAS(QMainWindow):
         self.selected_vehicle = "Drone1"
         self.api_connected = False
 
-        # Create 3D Spatial Map Window (Hidden initially)
-        self.map_window = SpatialMapWindow(self)
+        # Persistent Map Manager
+        self.map_manager = PersistentMapManager()
+        
+        # Load existing saved map if present
+        if os.path.exists(MAP_SAVE_FILE):
+            self.map_manager.load_map(MAP_SAVE_FILE)
+
+        # Create 3D/2D Spatial Map Window (Hidden initially)
+        self.map_window = SpatialMapWindow(self.map_manager, self)
 
         root = QWidget()
         root.setObjectName("root")
@@ -674,7 +946,7 @@ class LifeMAS(QMainWindow):
         title_box.setSpacing(2)
         app_title = QLabel("LIFEMAS DRONE WORKSTATION")
         app_title.setObjectName("app_title")
-        app_sub = QLabel("AIRSIMNH SIMULATOR WORKSPACE & SPATIAL MAPPING")
+        app_sub = QLabel("AIRSIMNH SIMULATOR WORKSPACE & PERSISTENT SPATIAL MAPPING")
         app_sub.setObjectName("app_sub")
         title_box.addWidget(app_title)
         title_box.addWidget(app_sub)
@@ -701,7 +973,7 @@ class LifeMAS(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("main_splitter")
 
-        # MAIN WORKSPACE: Embedded AirSimNH Simulator Viewport (Priority 1)
+        # MAIN WORKSPACE: Embedded AirSimNH Simulator Viewport
         self.main_sim_viewport = Viewport()
         self.main_sim_viewport.on_resize = self.resize_hosted_window
         vp_layout = QVBoxLayout(self.main_sim_viewport)
@@ -712,7 +984,7 @@ class LifeMAS(QMainWindow):
             "1. Click 'Launch AirSimNH' in the sidebar\n"
             "2. Wait for window detection\n"
             "3. Click 'Embed Viewport' to host Unreal Engine view here\n"
-            "4. Click 'Connect API' to begin telemetry & mapping"
+            "4. Click 'Connect API' to begin telemetry & persistent mapping"
         )
         self.placeholder.setObjectName("placeholder_lbl")
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -758,7 +1030,7 @@ class LifeMAS(QMainWindow):
         sidebar_layout.addLayout(embed_row)
         sidebar_layout.addWidget(self.connect_api_btn)
 
-        # Section 2: Autonomous Mapping Mission (Priority 4)
+        # Section 2: Autonomous Mapping Mission
         sidebar_layout.addWidget(self.section_header("2. AUTONOMOUS MAPPING MISSION"))
 
         self.start_mission_btn = QPushButton("▶ Start Mapping Mission")
@@ -788,16 +1060,16 @@ class LifeMAS(QMainWindow):
         sidebar_layout.addLayout(mission_row)
         sidebar_layout.addWidget(self.mission_status_lbl)
 
-        # Section 3: 3D Spatial Map Window Launcher (Priority 1)
-        sidebar_layout.addWidget(self.section_header("3. 3D SPATIAL MAPPING VISUALIZATION"))
+        # Section 3: Persistent Spatial Map Launcher
+        sidebar_layout.addWidget(self.section_header("3. PERSISTENT SPATIAL MAPPING"))
 
-        self.open_map_card_btn = QPushButton("OPEN 3D MAP WINDOW ↗")
+        self.open_map_card_btn = QPushButton("OPEN PERSISTENT MAP ↗")
         self.open_map_card_btn.setObjectName("btn_map_card")
         self.open_map_card_btn.clicked.connect(self.open_map_window)
 
         map_stats_row = QHBoxLayout()
-        self.sidebar_pts_lbl = QLabel("Map Points: 0")
-        self.sidebar_sensor_lbl = QLabel("Sensor: Waiting")
+        self.sidebar_pts_lbl = QLabel("Explored: 0.0 m²")
+        self.sidebar_sensor_lbl = QLabel("Mode: 2D Vacuum")
         self.sidebar_pts_lbl.setObjectName("telem_val")
         self.sidebar_sensor_lbl.setObjectName("telem_val")
         map_stats_row.addWidget(self.sidebar_pts_lbl)
@@ -807,7 +1079,7 @@ class LifeMAS(QMainWindow):
         sidebar_layout.addWidget(self.open_map_card_btn)
         sidebar_layout.addLayout(map_stats_row)
 
-        # Section 4: Telemetry (Priority 2)
+        # Section 4: Telemetry
         sidebar_layout.addWidget(self.section_header("4. VEHICLE TELEMETRY"))
 
         telem_grid = QGridLayout()
@@ -852,11 +1124,24 @@ class LifeMAS(QMainWindow):
         self.poll_timer.setInterval(1000)
         self.poll_timer.timeout.connect(self.check_simulator_window)
 
+        # Map Periodic Auto-Save Timer (Every 10 Seconds)
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(10000)
+        self.autosave_timer.timeout.connect(self.autosave_map)
+        self.autosave_timer.start()
+
     @staticmethod
     def section_header(text):
         lbl = QLabel(text)
         lbl.setObjectName("section_hdr")
         return lbl
+
+    def autosave_map(self):
+        if self.map_manager.has_bounds or len(self.map_manager.grid_cells) > 0:
+            try:
+                self.map_manager.save_map(MAP_SAVE_FILE)
+            except Exception:
+                pass
 
     def apply_styles(self):
         self.setStyleSheet("""
@@ -931,6 +1216,14 @@ class LifeMAS(QMainWindow):
             }
             QPushButton#btn_map_card:hover { background: #312e81; color: #ffffff; }
 
+            QPushButton#btn_mode_active {
+                background: #2563eb; color: #ffffff; border: none; font-weight: 700; padding: 4px 10px;
+            }
+            QPushButton#btn_mode_inactive {
+                background: #1e293b; color: #94a3b8; border: 1px solid #334155; padding: 4px 10px;
+            }
+            QPushButton#btn_mode_inactive:hover { background: #334155; color: #ffffff; }
+
             QPushButton:disabled {
                 color: #475569; background: #141a24; border-color: #1e293b;
             }
@@ -981,7 +1274,7 @@ class LifeMAS(QMainWindow):
 
         self.worker = LidarTelemetryWorker()
         self.worker.set_vehicle(self.selected_vehicle)
-        self.worker.lidar_data_signal.connect(self.map_window.add_point_cloud)
+        self.worker.lidar_data_signal.connect(self.map_window.add_lidar_scan)
         self.worker.lidar_data_signal.connect(self.update_sidebar_map_stats)
         self.worker.sensor_status_signal.connect(self.map_window.update_sensor_status)
         self.worker.telemetry_signal.connect(self.update_telemetry_ui)
@@ -1024,10 +1317,11 @@ class LifeMAS(QMainWindow):
         self.api_status_lbl.style().unpolish(self.api_status_lbl)
         self.api_status_lbl.style().polish(self.api_status_lbl)
 
-    @Slot(object, str, int, float, float, float)
-    def update_sidebar_map_stats(self, pts_new, sensor_name, scan_pts, dx, dy, dz):
-        self.sidebar_pts_lbl.setText(f"Map Points: {len(self.map_window.accumulated_points):,}")
-        self.sidebar_sensor_lbl.setText(f"Sensor: {sensor_name}")
+    @Slot(object, str, int, float, float, float, float)
+    def update_sidebar_map_stats(self, pts_new, sensor_name, scan_pts, dx, dy, dz, yaw_rad=0.0):
+        explored_cells = len(self.map_manager.grid_cells)
+        area_m2 = explored_cells * (self.map_manager.cell_size ** 2)
+        self.sidebar_pts_lbl.setText(f"Explored: {area_m2:.1f} m²")
 
     @Slot(dict)
     def update_telemetry_ui(self, t):
@@ -1039,15 +1333,12 @@ class LifeMAS(QMainWindow):
         self.telemetry["Ready / Arm"].setText(f"R:{t['ready']} | Arm:{t['can_arm']}")
         self.telemetry["Landed State"].setText(t["landed_state"].replace("LandedState.", ""))
 
-    # --- Mission Control Methods (Priority 4) ---
+    # --- Mission Control Methods ---
 
     def start_mapping_mission(self):
-        if not self.api_connected:
-            QMessageBox.warning(
-                self, "API Disconnected",
-                "Please click 'Connect API' before starting the mapping mission."
-            )
-            return
+        # Auto-connect API if not already connected
+        if not self.api_connected or self.worker is None or not self.worker.isRunning():
+            self.connect_api()
 
         if self.mission_worker and self.mission_worker.isRunning():
             if self.mission_worker.paused:
@@ -1114,6 +1405,12 @@ class LifeMAS(QMainWindow):
         self.pause_mission_btn.setEnabled(False)
         self.pause_mission_btn.setText("Pause / Hover")
         self.status.showMessage(f"Mission: {msg}")
+        if not success and "stopped" not in msg.lower():
+            QMessageBox.warning(
+                self, "Mission Error",
+                f"Autonomous mission could not complete:\n\n{msg}\n\n"
+                "Ensure AirSimNH is launched and finished loading."
+            )
 
     @Slot(bool, str)
     def finish_landing(self, success, msg):
@@ -1234,6 +1531,7 @@ class LifeMAS(QMainWindow):
         self.status.showMessage("AirSimNH window restored to standalone window.")
 
     def closeEvent(self, event):
+        self.autosave_map()
         if self.worker:
             self.worker.stop()
         if self.main_sim_viewport.hosted_hwnd:
