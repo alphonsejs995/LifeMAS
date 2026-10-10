@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# AirSim Simulator Executable & Unreal Engine Packaged Distributions
+AirSimNH/
+*.exe
+*.dll
+*.pak
+Saved/
+
+# Backup & Temporary files
+*.backup
+*.backup_*
+*.before_*
+*.tmp
+*.log
+
+# Editor & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local Environment Configuration (keep example files only)
+settings.json
+*.env

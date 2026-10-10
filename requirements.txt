@@ -1,0 +1,5 @@
+airsim==1.8.1
+PySide6>=6.4.0
+numpy>=1.21.0
+opencv-contrib-python>=4.5.0
+msgpack-rpc-python>=0.4.1
