@@ -38,7 +38,7 @@ In GPS-denied or degraded disaster zones, single-agent platforms face payload, b
 
 1. **Autonomous Flight Control**: Provide robust Python-driven API control over UAV kinematics, takeoff/landing sequences, and multi-axis velocity vectors.
 2. **Integrated Control Dashboard**: Offer a modern operator dashboard built with PySide6 that embeds live Unreal Engine simulator viewports, displays real-time telemetry, and exposes manual override tools.
-3. **Disaster Environment Mapping**: Reconstruct persistent 2D occupancy grids and 3D voxel point clouds in real time using 3D LiDAR sensors and PyOpenGL rendering.
+3. **Aerial Survey & Environment Mapping**: Reconstruct persistent 2D occupancy grids and 3D voxel point clouds in real time using 3D LiDAR sensors, boustrophedon lawnmower survey patterns, and PyOpenGL rendering.
 4. **Cooperative Multi-Agent Coordination**: Enable swarms of autonomous drones to execute distributed search missions without central bottlenecks. *(Planned)*
 5. **Multi-Agent Reinforcement Learning (MARL)**: Implement algorithms such as **MAPPO** (Multi-Agent Proximal Policy Optimization) for dynamic obstacle avoidance and cooperative task allocation. *(Planned)*
 
@@ -46,19 +46,23 @@ In GPS-denied or degraded disaster zones, single-agent platforms face payload, b
 
 ## ✅ Current Implementation Status
 
-The project features a **multi-threaded drone simulation dashboard, persistent spatial mapping engine, and autonomous flight controller**:
+The project features an **autonomous aerial survey flight engine, multi-threaded dashboard, and persistent 3D spatial mapping system**:
 
+- **Autonomous Aerial Survey Engine (`mapping/survey_engine.py`)**:
+  - **Boustrophedon Coverage Planning**: Automated lawnmower survey flight plans bounded within configurable scan dimensions, altitudes, lane spacing, and turn rates.
+  - **Sensor Frame Transformation**: Exact quaternion-based rotation and translation transforms aligning sensor-relative LiDAR returns with AirSim visual world coordinates.
+  - **3D Elevation Gradient Rendering**: Dynamic multi-stage elevation colormap (Navy/Teal ground -> Emerald mid -> Gold/White elevations).
+  - **Point Cloud Exporters**: High-resolution export of reconstructed survey point clouds to XYZ, PLY, and compressed NPZ formats.
+- **High-Performance Persistent World-Frame Mapping Engine (`mapping/persistent_map.py`)**:
+  - **Thread-Safe Architecture**: Reentrant locking (`RLock`) ensuring concurrent read/write access during heavy flight streaming.
+  - **Ground vs. Obstacle Discrimination**: Height-filtered ray-tracing distinguishing navigable free-space ground planes from obstacles.
+  - **Vectorized Rasterization**: Sub-millisecond hardware-accelerated QImage generation for 2D occupancy grid visualization.
+  - **3D Voxel Deduplication**: World-coordinate voxel grid preventing duplicate point buildup.
+  - **Disk Persistence**: Save and load compressed maps (`.npz`) preserving boundaries, voxel grids, and metadata.
 - **AirSimNH Simulator Integration**: Automated launching and Win32 window embedding of the packaged `AirSimNH` Unreal Engine environment directly into a PySide6 GUI container.
-- **Persistent World-Frame Mapping Engine (`mapping/persistent_map.py`)**:
-  - **2D Occupancy Grid**: Robot-vacuum style occupancy grid using 2D Bresenham ray-tracing for free-space and obstacle demarcation.
-  - **3D Voxel Point Cloud**: World-coordinate voxel grid with spatial deduplication to prevent point accumulation.
-  - **Disk Persistence**: Save and load compressed maps (`.npz`) with metadata, cell values, and world bounds preserved.
-- **Dual Visualizer Window**: Dedicated UI for real-time 2D occupancy grid plotting and OpenGL 3D spatial point cloud exploration.
-- **Asynchronous Worker Architecture**: Non-blocking `QThread` pipeline (`AirSimWorker`, `AutonomousMappingWorker`, `LandingWorker`) ensuring smooth GUI responsiveness during heavy telemetry polling and flight maneuvers.
-- **Autonomous Mapping Mission Control**: Pre-programmed flight patterns (takeoff, lawnmower/perimeter search grid, 3D LiDAR scanning, automated landing & disarm).
-- **Live Telemetry & Diagnostics**: Real-time rendering of UAV position coordinates $(x, y, z)$, linear velocities $(v_x, v_y, v_z)$, pitch/roll/yaw orientation, battery/connection status, and mission logs.
+- **Asynchronous Worker Architecture**: Non-blocking `QThread` pipeline (`AirSimWorker`, `SurveyFlightWorker`, `AutonomousMappingWorker`, `LandingWorker`) ensuring zero GUI stuttering.
 - **Manual WASD Control UI**: Dedicated interactive GUI window enabling smooth 6-DOF manual keyboard flight testing ($W/S$ forward/backward, $A/D$ left/right, $R/F$ ascend/descend, $Q/E$ yaw turn, `Space` emergency hover).
-- **Comprehensive Testing Suite**: Diagnostic scripts in `control/` for LiDAR point cloud verification, persistent map stability, autonomous mapping simulation, UI component testing, and flight readiness.
+- **Comprehensive Testing Suite**: Diagnostic scripts in `control/` for LiDAR geometry diagnosis, sensor frame verification, survey flight verification, persistent mapping stability, and UI testing.
 
 > [!NOTE]
 > *Multi-agent swarm coordination and MARL policy training (MAPPO) are active roadmap goals under ongoing development.*
@@ -78,21 +82,21 @@ The project features a **multi-threaded drone simulation dashboard, persistent s
                  v                                    v                            v
 +---------------------------------+  +---------------------------------+  +---------------------------------+
 |   Embedded AirSimNH Viewport    |  |     2D Occupancy Grid Map       |  |  3D LiDAR Point Cloud Viewport  |
-| (Win32 HWND Host Workspace)     |  |   (Bresenham Ray-Tracing)       |  |   (PyQtGraph + PyOpenGL 3D)     |
+| (Win32 HWND Host Workspace)     |  | (Vectorized QImage + Raytrace)  |  |  (Elevation Colormap + OpenGL)  |
 +---------------------------------+  +----------------+----------------+  +---------------------------------+
                  |                                    |                            |
                  +--------------------+               |       +--------------------+
                                       |               |       |
                                       v               v       v
                                 +-----------------------------------+
-                                |     PersistentMapManager Engine   |
-                                |  (World-Frame Grid + 3D Voxels)   |
+                                |    SurveyEngine & PersistentMap   |
+                                |  (Boustrophedon Plan + 3D Voxels) |
                                 +-----------------+-----------------+
                                                   |
                                                   v
                                 +-----------------------------------+
                                 |  QThread Asynchronous Worker Pool |
-                                |  (AirSimWorker, Mapping, Landing) |
+                                |  (SurveyWorker, Mapping, Landing) |
                                 +-----------------+-----------------+
                                                   |
                                                   | Python AirSim RPC API (Port 41451)
@@ -195,11 +199,11 @@ Due to repository size constraints, the pre-built `AirSimNH` Unreal Engine distr
 ```bash
 python ui/main.py
 ```
-1. Click **1 Launch Simulator** to launch the `AirSimNH` process.
+1. Click **1 Launch Simulator** to start the `AirSimNH` process.
 2. Click **2 Embed Viewport** to dock the simulator window directly into the primary dashboard workspace.
 3. Click **3 Connect API** to initiate asynchronous telemetry, mapping, and 3D LiDAR streaming.
-4. Click **▶ Start Mapping Mission** to execute automated spatial scanning.
-5. Use **Open Map Window** to inspect the 2D occupancy grid and 3D point cloud, and use **Save Map** / **Load Map** to persist maps across sessions.
+4. Open the **Survey Mission Planner** to configure coverage dimensions and launch an automated boustrophedon aerial survey.
+5. Inspect real-time 2D occupancy grids and 3D elevation-gradient point clouds, and export results in XYZ/PLY/NPZ formats.
 
 ### Option B: WASD Flight Controller
 ```bash
@@ -212,25 +216,20 @@ python wasd_control.py
 - **Space**: Stop & Hover in place
 - **Esc**: Disarm & Exit
 
-### Option C: Running the Diagnostic Test Suite
+### Option C: Running the Verification Suite
 ```bash
-# Verify persistent mapping engine requirements
+# Verify autonomous survey flight engine logic
+python control/test_survey_engine.py
+
+# Verify survey UI workflow components
+python control/test_survey_workflow_ui.py
+
+# Verify LiDAR geometry and sensor transformations
+python control/diagnose_lidar_geometry.py
+python control/verify_sensor_frame.py
+
+# Run persistent mapping requirement tests
 python control/test_persistent_mapping.py
-
-# Test persistent map manager unit functionality
-python control/test_map_manager.py
-
-# Run comprehensive diagnostic test suite
-python control/run_diagnostic.py
-
-# Test 3D LiDAR data acquisition
-python control/test_lidar.py
-
-# Test autonomous mapping pattern execution
-python control/test_autonomous_mapping.py
-
-# Launch UI test verification
-python control/test_ui_comprehensive.py
 ```
 
 ---
@@ -239,33 +238,39 @@ python control/test_ui_comprehensive.py
 
 ```
 LifeMAS/
-├── .gitignore                    # Git ignore rules for binaries, venv, pycache, and datasets
-├── LICENSE                       # MIT License
-├── README.md                     # Comprehensive project documentation
-├── requirements.txt              # Python dependency manifest (PySide6, pyqtgraph, PyOpenGL, airsim)
-├── settings.example.json         # AirSim configuration template with 3D LiDAR enabled
-├── airsim_test.py                # API connection diagnostic script
-├── flight_test.py                # Automated flight test script
-├── wasd_control.py               # Interactive keyboard flight controller UI
-├── control/                      # Flight control logic & diagnostic test suite
-│   ├── check_api_control.py      # API ownership verification
-│   ├── check_state.py            # Multirotor state inspector
-│   ├── diagnose_readiness.py     # System readiness diagnostic tool
-│   ├── run_diagnostic.py         # Test suite runner
-│   ├── test_autonomous_mapping.py# Mapping flight mission verification
-│   ├── test_lidar.py             # 3D LiDAR sensor streaming test
-│   ├── test_map_manager.py       # PersistentMapManager unit tests
-│   ├── test_persistent_mapping.py# Multi-scan coordinate stability & persistence tests
-│   ├── test_ui_comprehensive.py  # UI component integration test
-│   └── test_ui_launch.py         # Headless UI launch test
+├── .gitignore                          # Git ignore rules for binaries, venv, datasets, and exports
+├── LICENSE                             # MIT License
+├── README.md                           # Comprehensive project documentation
+├── requirements.txt                    # Python dependency manifest
+├── settings.example.json               # AirSim configuration template with 3D LiDAR enabled
+├── airsim_test.py                      # API connection diagnostic script
+├── flight_test.py                      # Automated flight test script
+├── wasd_control.py                     # Interactive keyboard flight controller UI
+├── control/                            # Flight control logic & verification test suite
+│   ├── check_api_control.py            # API ownership verification
+│   ├── check_state.py                  # Multirotor state inspector
+│   ├── diagnose_lidar_geometry.py      # Sensor frame geometry diagnostic
+│   ├── diagnose_readiness.py           # System readiness diagnostic tool
+│   ├── run_diagnostic.py               # Test suite runner
+│   ├── run_survey_flight_verification.py # Full survey mission flight validator
+│   ├── test_autonomous_mapping.py      # Mapping flight mission verification
+│   ├── test_lidar.py                   # 3D LiDAR sensor streaming test
+│   ├── test_map_manager.py             # PersistentMapManager unit tests
+│   ├── test_persistent_mapping.py      # Multi-scan stability & persistence tests
+│   ├── test_survey_engine.py           # Survey planner & reconstruction unit tests
+│   ├── test_survey_workflow_ui.py      # Survey workflow UI component tests
+│   ├── test_ui_comprehensive.py        # UI component integration test
+│   ├── test_ui_launch.py               # Headless UI launch test
+│   └── verify_sensor_frame.py          # Sensor coordinate frame validator
 ├── data/
-│   └── maps/                     # Directory for persistent map storage (.npz)
+│   └── maps/                           # Directory for persistent map storage
 │       └── .gitkeep
-├── mapping/                      # Spatial mapping engine
-│   └── persistent_map.py         # PersistentMapManager (2D Occupancy Grid + 3D Voxels)
-├── ui/                           # PySide6 graphical user interface
-│   └── main.py                   # Main dashboard, QThread worker pool, 2D Grid & 3D LiDAR window
-└── simulator/                    # [Planned] Multi-drone spawning & environment management
+├── mapping/                            # Spatial survey & mapping engine
+│   ├── persistent_map.py               # PersistentMapManager (2D Occupancy Grid + 3D Voxels)
+│   └── survey_engine.py                # SurveyEngine (Boustrophedon planning, 3D Elevation Color, Export)
+├── ui/                                 # PySide6 graphical user interface
+│   └── main.py                         # Main dashboard, Survey Planner & Dual 2D/3D visualizer
+└── simulator/                          # [Planned] Multi-drone spawning & environment management
 ```
 
 ---
@@ -284,11 +289,16 @@ LifeMAS/
   - [x] Persistent world-frame 2D occupancy grid with Bresenham ray-tracing.
   - [x] 3D voxel grid point deduplication.
   - [x] Map file persistence (compressed `.npz` save/load).
-- [ ] **Phase 4: Multi-Agent Swarm Integration**
+- [x] **Phase 4: Autonomous Aerial Survey & High-Fidelity 3D Reconstruction**
+  - [x] Boustrophedon (lawnmower) survey coverage planning.
+  - [x] Quaternion sensor-to-world coordinate transformations.
+  - [x] Dynamic 3D elevation gradient colormap.
+  - [x] Multi-format point cloud export (XYZ, PLY, NPZ).
+- [ ] **Phase 5: Multi-Agent Swarm Integration**
   - [ ] Multi-vehicle configuration in AirSim (`Drone1`, `Drone2`, `Drone3`).
   - [ ] Distributed swarm communication protocol.
   - [ ] Decentralized collision avoidance algorithms.
-- [ ] **Phase 5: Multi-Agent Reinforcement Learning (MARL)**
+- [ ] **Phase 6: Multi-Agent Reinforcement Learning (MARL)**
   - [ ] Gym/PettingZoo environment wrapper for AirSim swarms.
   - [ ] MAPPO (Multi-Agent PPO) policy training for search-and-rescue coverage.
   - [ ] Benchmark comparison against classical path planning (A*, RRT*).

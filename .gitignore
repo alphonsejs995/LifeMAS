@@ -26,11 +26,16 @@ Saved/
 *.tmp
 *.log
 
-# Generated datasets and mapping cache
+# Generated datasets, point cloud exports, and mapping cache
 *.npz
 *.npy
 *.tmp.npz
+*.xyz
+*.ply
+*.pcd
 data/maps/*.npz
+data/maps/*.xyz
+data/maps/*.ply
 !data/maps/.gitkeep
 
 # Editor & OS files
